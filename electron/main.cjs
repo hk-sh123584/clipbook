@@ -1,0 +1,438 @@
+const path = require('node:path')
+const fs = require('node:fs')
+const { execFile } = require('node:child_process')
+const { createHash } = require('node:crypto')
+const { pathToFileURL } = require('node:url')
+const {
+  app,
+  BrowserWindow,
+  clipboard,
+  globalShortcut,
+  ipcMain,
+  Menu,
+  nativeImage,
+  net,
+  protocol,
+  screen,
+  Tray,
+} = require('electron')
+const { ClipStore } = require('./store.cjs')
+
+const isDev = Boolean(process.env.VITE_DEV_SERVER_URL)
+const HOTKEY = 'Control+Shift+V'
+const HIDDEN_WINDOW_TTL = 5000
+
+let win = null
+let tray = null
+let store = null
+let lastText = ''
+let lastImageKey = ''
+let pollTimer = null
+let hiddenWindowTimer = null
+let savedWindowBounds = null
+let savedWindowMaximized = false
+let showWindowWhenReady = false
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'clipimg', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+])
+
+// 界面以静态内容为主，软件渲染可显著降低 GPU 进程内存。
+app.disableHardwareAcceleration()
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => showWindow())
+}
+
+function broadcast() {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('clips:updated', store.items)
+  }
+}
+
+function assetPath(name) {
+  return path.join(__dirname, '..', 'assets', name)
+}
+
+function imageKey(image) {
+  const size = image.getSize()
+  const hash = createHash('sha1').update(image.toBitmap()).digest('hex')
+  return { key: `${size.width}x${size.height}-${hash}`, hash, width: size.width, height: size.height }
+}
+
+function createThumbnail(image) {
+  const { width, height } = image.getSize()
+  const scale = Math.min(1, 480 / width, 320 / height)
+  return image.resize({
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  })
+}
+
+function ensureImageThumbnails() {
+  let changed = false
+  for (const item of store.items) {
+    if (item.kind !== 'image' || !item.image) continue
+    const thumbFile = `${path.parse(item.image.file).name}-thumb.png`
+    const thumbPath = path.join(store.imagesDir, thumbFile)
+    if (item.image.thumbFile === thumbFile && fs.existsSync(thumbPath)) continue
+
+    try {
+      const image = nativeImage.createFromPath(path.join(store.imagesDir, item.image.file))
+      if (image.isEmpty()) continue
+      fs.writeFileSync(thumbPath, createThumbnail(image).toPNG())
+      item.image.thumbFile = thumbFile
+      changed = true
+    } catch (err) {
+      console.error('[thumbnail] 生成失败', err)
+    }
+  }
+  if (changed) {
+    store.persist()
+    broadcast()
+  }
+}
+
+function registerImageProtocol() {
+  protocol.handle('clipimg', async (request) => {
+    try {
+      const name = path.basename(decodeURIComponent(new URL(request.url).pathname))
+      if (!/^[0-9a-f]{40}(?:-thumb)?\.png$/.test(name)) {
+        return new Response('not found', { status: 404 })
+      }
+      return await net.fetch(pathToFileURL(path.join(store.imagesDir, name)).toString())
+    } catch {
+      return new Response('not found', { status: 404 })
+    }
+  })
+}
+
+function pollClipboard() {
+  const text = clipboard.readText()
+  if (text) {
+    if (text !== lastText) {
+      lastText = text
+      if (store.add(text)) broadcast()
+    }
+    return
+  }
+  if (!clipboard.availableFormats().some((format) => format.startsWith('image/'))) return
+
+  const image = clipboard.readImage()
+  if (image.isEmpty()) return
+  const info = imageKey(image)
+  if (info.key === lastImageKey) return
+
+  lastImageKey = info.key
+  const thumbnail = createThumbnail(image).toPNG()
+  if (store.addImage(image.toPNG(), info.hash, info.width, info.height, thumbnail)) broadcast()
+}
+
+function createWindow() {
+  const current = new BrowserWindow({
+    width: savedWindowBounds?.width || 460,
+    height: savedWindowBounds?.height || 600,
+    minWidth: 360,
+    minHeight: 420,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: true,
+    maximizable: true,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false,
+      backgroundThrottling: true,
+    },
+  })
+  win = current
+
+  current.once('ready-to-show', () => {
+    if (win === current && showWindowWhenReady) presentWindow()
+  })
+
+  current.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault()
+      hideWindow()
+    }
+  })
+
+  current.on('closed', () => {
+    if (win === current) win = null
+  })
+
+  current.on('maximize', () => {
+    savedWindowMaximized = true
+  })
+
+  current.on('unmaximize', () => {
+    savedWindowMaximized = false
+  })
+
+  if (isDev) {
+    current.loadURL(process.env.VITE_DEV_SERVER_URL)
+  } else {
+    current.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  }
+}
+
+function positionWindow() {
+  const cursor = screen.getCursorScreenPoint()
+  const area = screen.getDisplayNearestPoint(cursor).workArea
+  const [w, h] = win.getSize()
+  const x = Math.round(area.x + (area.width - w) / 2)
+  const y = Math.round(area.y + area.height * 0.18)
+  win.setPosition(
+    Math.max(area.x, Math.min(x, area.x + area.width - w)),
+    Math.max(area.y, Math.min(y, area.y + area.height - h)),
+  )
+}
+
+function presentWindow() {
+  if (!win || win.isDestroyed()) return
+  showWindowWhenReady = false
+  if (savedWindowMaximized) {
+    const area = screen.getDisplayMatching(savedWindowBounds || win.getBounds()).workArea
+    win.setBounds(area)
+  }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+  win.webContents.send('window:shown')
+}
+
+function showWindow() {
+  if (hiddenWindowTimer) {
+    clearTimeout(hiddenWindowTimer)
+    hiddenWindowTimer = null
+  }
+  showWindowWhenReady = true
+
+  if (!win || win.isDestroyed()) {
+    createWindow()
+    if (savedWindowBounds) win.setBounds(savedWindowBounds)
+    else {
+      positionWindow()
+      savedWindowBounds = win.getBounds()
+    }
+    return
+  }
+  presentWindow()
+}
+
+function hideWindow() {
+  if (!win || win.isDestroyed()) return
+  const current = win
+  if (current.isMaximized()) {
+    savedWindowMaximized = true
+    savedWindowBounds = current.getNormalBounds()
+  } else if (!savedWindowMaximized) {
+    savedWindowBounds = current.getBounds()
+  }
+  showWindowWhenReady = false
+  current.hide()
+
+  if (hiddenWindowTimer) clearTimeout(hiddenWindowTimer)
+  hiddenWindowTimer = setTimeout(() => {
+    if (win === current && !current.isDestroyed() && !current.isVisible()) {
+      current.destroy()
+    }
+    hiddenWindowTimer = null
+  }, HIDDEN_WINDOW_TTL)
+}
+
+function toggleWindow() {
+  if (win && !win.isDestroyed() && win.isVisible() && !win.isMinimized()) hideWindow()
+  else showWindow()
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(assetPath('tray.png'))
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }))
+  tray.setToolTip('剪贴簿 · Ctrl+Shift+V')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示剪贴簿', click: () => showWindow() },
+      { type: 'separator' },
+      { label: '清空历史', click: () => { store.clear(); broadcast() } },
+      { type: 'separator' },
+      { label: '退出', click: () => { app.isQuitting = true; app.quit() } },
+    ]),
+  )
+  tray.on('click', () => toggleWindow())
+}
+
+function promoteTrayIcon(callback) {
+  if (process.platform !== 'win32') return callback(false)
+  // 系统没有提供设置托盘位置的接口，只能改写用户级托盘配置。
+  // 系统的托盘记录条目要过几秒才出现，这里在系统内部轮询等待。
+  const exe = process.execPath
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$root = 'HKCU:\\Control Panel\\NotifyIconSettings'",
+    `$exe = '${exe.replace(/'/g, "''")}'`,
+    '$deadline = (Get-Date).AddSeconds(40)',
+    'while ((Get-Date) -lt $deadline) {',
+    '  $found = $false',
+    '  Get-ChildItem -LiteralPath $root | ForEach-Object {',
+    '    $path = (Get-ItemProperty -LiteralPath $_.PSPath).ExecutablePath',
+    '    if ($path -and $path -eq $exe) {',
+    '      New-ItemProperty -LiteralPath $_.PSPath -Name IsPromoted -Value 1 -PropertyType DWord -Force | Out-Null',
+    '      $found = $true',
+    '    }',
+    '  }',
+    "  if ($found) { Write-Output 'MATCHED'; break }",
+    '  Start-Sleep -Milliseconds 800',
+    '}',
+  ].join('\n')
+
+  execFile(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
+    { windowsHide: true, timeout: 60000 },
+    (_error, stdout) => callback(String(stdout || '').includes('MATCHED')),
+  )
+}
+
+function initTrayPlacement() {
+  const stateFile = path.join(app.getPath('userData'), 'tray-state.json')
+  let initialized = false
+  try {
+    initialized = Boolean(JSON.parse(fs.readFileSync(stateFile, 'utf8')).initialized)
+  } catch {
+    initialized = false
+  }
+  if (initialized) return
+
+  promoteTrayIcon((matched) => {
+    if (!matched) return
+    try {
+      fs.mkdirSync(path.dirname(stateFile), { recursive: true })
+      fs.writeFileSync(stateFile, JSON.stringify({ initialized: true }, null, 2), 'utf8')
+    } catch (err) {
+      console.error('[tray] 状态写入失败', err)
+    }
+  })
+}
+
+function registerIpc() {
+  ipcMain.handle('clips:list', () => store.items)
+
+  ipcMain.handle('clips:copy', (_event, id) => {
+    const item = store.items.find((it) => it.id === id)
+    if (!item) return store.items
+
+    if (item.kind === 'image' && item.image) {
+      const image = nativeImage.createFromPath(path.join(store.imagesDir, item.image.file))
+      if (image.isEmpty()) return store.items
+      clipboard.writeImage(image)
+      lastText = ''
+      lastImageKey = imageKey(image).key
+    } else {
+      clipboard.writeText(item.text)
+      lastText = item.text
+    }
+
+    store.markCopied(id)
+    return store.items
+  })
+
+  ipcMain.handle('clips:delete', (_event, id) => {
+    const items = store.remove(id)
+    broadcast()
+    return items
+  })
+
+  ipcMain.handle('clips:togglePin', (_event, id) => {
+    const items = store.togglePin(id)
+    broadcast()
+    return items
+  })
+
+  ipcMain.handle('clips:clear', () => {
+    const items = store.clear()
+    broadcast()
+    return items
+  })
+
+  ipcMain.handle('window:hide', () => {
+    hideWindow()
+  })
+
+  ipcMain.on('window:control', (_event, action) => {
+    if (!win) return
+    if (action === 'minimize') {
+      hideWindow()
+    } else if (action === 'maximize') {
+      if (savedWindowMaximized) {
+        savedWindowMaximized = false
+        if (savedWindowBounds) win.setBounds(savedWindowBounds)
+      } else {
+        savedWindowBounds = win.getNormalBounds()
+        const area = screen.getDisplayMatching(win.getBounds()).workArea
+        savedWindowMaximized = true
+        win.setBounds(area)
+      }
+    } else if (action === 'close') {
+      win.close()
+    }
+  })
+
+  ipcMain.on('window:resize', (_event, { width, height }) => {
+    if (!win || !Number.isFinite(width) || !Number.isFinite(height)) return
+    const bounds = win.getBounds()
+    const area = screen.getDisplayMatching(bounds).workArea
+    const nextWidth = Math.round(Math.min(Math.max(width, 360), area.width))
+    const nextHeight = Math.round(Math.min(Math.max(height, 420), area.height))
+    const x = Math.min(Math.max(bounds.x, area.x), area.x + area.width - nextWidth)
+    const y = Math.min(Math.max(bounds.y, area.y), area.y + area.height - nextHeight)
+    win.setBounds({ x, y, width: nextWidth, height: nextHeight })
+  })
+
+  ipcMain.handle('app:info', () => ({
+    hotkey: HOTKEY,
+    version: app.getVersion(),
+    dataFile: store.file,
+  }))
+}
+
+app.whenReady().then(() => {
+  app.setAppUserModelId('com.clipbook.app')
+  store = new ClipStore(app.getPath('userData'))
+  registerImageProtocol()
+  registerIpc()
+  createTray()
+  initTrayPlacement()
+  setTimeout(ensureImageThumbnails, 500)
+
+  if (!globalShortcut.register(HOTKEY, toggleWindow)) {
+    console.warn(`[hotkey] ${HOTKEY} 注册失败，可能被其他程序占用`)
+  }
+
+  lastText = clipboard.readText()
+  if (!lastText) {
+    const current = clipboard.readImage()
+    if (!current.isEmpty()) lastImageKey = imageKey(current).key
+  }
+  pollTimer = setInterval(pollClipboard, 400)
+})
+
+app.on('window-all-closed', () => {
+  // 常驻托盘，不随窗口关闭退出
+})
+
+app.on('will-quit', () => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (hiddenWindowTimer) clearTimeout(hiddenWindowTimer)
+  globalShortcut.unregisterAll()
+  if (store) store.flush()
+})

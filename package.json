@@ -1,0 +1,52 @@
+{
+  "name": "clipbook",
+  "version": "1.4.3",
+  "description": "本地剪贴板历史管理器",
+  "main": "electron/main.cjs",
+  "private": true,
+  "scripts": {
+    "icon": "node scripts/gen-icon.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build",
+    "dist": "npm run build && electron-builder --win portable"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-virtualized-auto-sizer": "^1.0.24",
+    "react-window": "^1.8.10"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/react-virtualized-auto-sizer": "^1.0.4",
+    "@types/react-window": "^1.8.8",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "com.clipbook.app",
+    "productName": "Clipbook",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "portable": {
+      "unpackDirName": "clipbook-portable"
+    }
+  }
+}
