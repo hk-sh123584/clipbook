@@ -148,6 +148,13 @@ export default function App() {
     setItems(next)
   }
 
+  const toggleTop = async (id: string) => {
+    const api = window.clipbook
+    if (!api) return
+    const next = await api.toggleTop(id)
+    setItems(next)
+  }
+
   const clearAll = async () => {
     const api = window.clipbook
     if (!api) return
@@ -255,7 +262,7 @@ export default function App() {
           type="button"
           className={`clear ${confirming ? 'danger' : ''}`}
           onClick={clearAll}
-          title="清空全部历史"
+          title="清空未收藏的历史（收藏项保留）"
         >
           {confirming ? '确认清空' : '清空'}
         </button>
@@ -320,6 +327,7 @@ export default function App() {
                         <span className="time">{formatTime(item.createdAt)}</span>
                         {KIND_LABEL[item.kind] && <span className="tag">{KIND_LABEL[item.kind]}</span>}
                         {item.truncated && <span className="tag">超长</span>}
+                        {item.top && <span className="tag">置顶</span>}
                         {item.kind === 'image' && item.image && (
                           <span className="shot-meta">
                             {item.image.width} × {item.image.height} · {Math.max(1, Math.round(item.image.bytes / 1024))} KB
@@ -345,7 +353,7 @@ export default function App() {
                         <button
                           type="button"
                           className={item.pinned ? 'starred' : ''}
-                          title={item.pinned ? '取消收藏' : '收藏置顶'}
+                          title={item.pinned ? '取消收藏' : '收藏（锁定不被清理）'}
                           onClick={(event) => {
                             event.stopPropagation()
                             togglePin(item.id)
@@ -353,6 +361,19 @@ export default function App() {
                         >
                           {item.pinned ? '★' : '☆'}
                         </button>
+                        {item.pinned && (
+                          <button
+                            type="button"
+                            className={item.top ? 'topped' : ''}
+                            title={item.top ? '取消置顶' : '置顶到列表顶部'}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              toggleTop(item.id)
+                            }}
+                          >
+                            {item.top ? '📌' : '📍'}
+                          </button>
+                        )}
                         <button
                           type="button"
                           title="删除这条"

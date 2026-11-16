@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('clipbook', {
   copy: (id) => ipcRenderer.invoke('clips:copy', id),
   remove: (id) => ipcRenderer.invoke('clips:delete', id),
   togglePin: (id) => ipcRenderer.invoke('clips:togglePin', id),
+  toggleTop: (id) => ipcRenderer.invoke('clips:toggleTop', id),
   clear: () => ipcRenderer.invoke('clips:clear'),
   hide: () => ipcRenderer.invoke('window:hide'),
   resize: (width, height) => ipcRenderer.send('window:resize', { width, height }),

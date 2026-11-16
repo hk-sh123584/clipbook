@@ -477,6 +477,12 @@ function registerIpc() {
     return items
   })
 
+  ipcMain.handle('clips:toggleTop', (_event, id) => {
+    const items = store.toggleTop(id)
+    broadcast()
+    return items
+  })
+
   ipcMain.handle('clips:clear', () => {
     clearHistory()
     return store.items

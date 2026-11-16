@@ -40,6 +40,7 @@ class ClipStore {
           image: it.image,
           hash: it.hash,
           pinned: Boolean(it.pinned),
+          top: it.top || undefined,
           createdAt: Number(it.createdAt) || Date.now(),
           copiedCount: Number(it.copiedCount) || 0,
           truncated: truncated || undefined,
@@ -79,7 +80,7 @@ class ClipStore {
   }
 
   sort() {
-    this.items.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.createdAt - a.createdAt)
+    this.items.sort((a, b) => Number(b.top) - Number(a.top) || b.createdAt - a.createdAt)
   }
 
   enforceItemLimit() {
@@ -436,6 +437,17 @@ class ClipStore {
     const item = this.items.find((it) => it.id === id)
     if (item) {
       item.pinned = !item.pinned
+      if (!item.pinned) item.top = undefined
+      this.sort()
+      this.persist()
+    }
+    return this.items
+  }
+
+  toggleTop(id) {
+    const item = this.items.find((it) => it.id === id)
+    if (item && item.pinned) {
+      item.top = item.top ? undefined : true
       this.sort()
       this.persist()
     }
@@ -451,8 +463,8 @@ class ClipStore {
   }
 
   clear() {
-    const removed = this.items
-    this.items = []
+    const removed = this.items.filter((it) => !it.pinned)
+    this.items = this.items.filter((it) => it.pinned)
     for (const item of removed) {
       if (item.kind === 'image') this.deleteImageFile(item)
       this.deleteTextFile(item)
