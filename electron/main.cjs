@@ -449,8 +449,9 @@ function registerIpc() {
       lastText = ''
       lastImageKey = imageKey(image).key
     } else {
-      clipboard.writeText(item.text)
-      lastText = item.text
+      const fullText = store.getFullText(id) || item.text
+      clipboard.writeText(fullText)
+      lastText = fullText
     }
 
     store.markCopied(id)

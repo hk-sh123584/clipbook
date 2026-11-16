@@ -17,6 +17,7 @@ export interface ClipItem {
   pinned: boolean
   createdAt: number
   copiedCount: number
+  truncated?: boolean
 }
 
 export interface AppInfo {

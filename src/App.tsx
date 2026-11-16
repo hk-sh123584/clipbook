@@ -215,7 +215,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  })
+  }, [filtered, active, query])
 
   const pinnedCount = items.filter((item) => item.pinned).length
 
@@ -304,7 +304,7 @@ export default function App() {
                 itemKey={(index) => filtered[index].id}
                 itemSize={(index) => (filtered[index].kind === 'image' ? 150 : 84)}
                 estimatedItemSize={84}
-                overscanCount={4}
+                overscanCount={2}
               >
                 {({ index, style }) => {
                   const item = filtered[index]
@@ -319,6 +319,7 @@ export default function App() {
                       <div className="meta">
                         <span className="time">{formatTime(item.createdAt)}</span>
                         {KIND_LABEL[item.kind] && <span className="tag">{KIND_LABEL[item.kind]}</span>}
+                        {item.truncated && <span className="tag">超长</span>}
                         {item.kind === 'image' && item.image && (
                           <span className="shot-meta">
                             {item.image.width} × {item.image.height} · {Math.max(1, Math.round(item.image.bytes / 1024))} KB

@@ -4,6 +4,8 @@ const { randomUUID } = require('node:crypto')
 
 const MAX_ITEMS = 1000
 const MAX_IMAGES = 100
+const MAX_TEXT_LENGTH = 100 * 1024
+const MAX_TEXT_PREVIEW = 8 * 1024
 const URL_RE = /^https?:\/\/\S+$/i
 const CODE_HINT = /[{};]\s*(?:'|"|`)?\s*$|\n\s+(?:const|let|function|import|def|class)\b/
 
@@ -19,6 +21,7 @@ class ClipStore {
     this.file = path.join(dir, 'clips.json')
     this.backupFile = `${this.file}.bak`
     this.imagesDir = path.join(dir, 'images')
+    this.textsDir = path.join(dir, 'texts')
     this.items = []
     this.saveTimer = null
     this.read()
@@ -28,16 +31,20 @@ class ClipStore {
     if (!Array.isArray(data)) return []
     return data
       .filter((it) => it && typeof it.id === 'string' && (typeof it.text === 'string' || it.kind === 'image'))
-      .map((it) => ({
-        id: it.id,
-        text: typeof it.text === 'string' ? it.text : '',
-        kind: it.kind || 'text',
-        image: it.image,
-        hash: it.hash,
-        pinned: Boolean(it.pinned),
-        createdAt: Number(it.createdAt) || Date.now(),
-        copiedCount: Number(it.copiedCount) || 0,
-      }))
+      .map((it) => {
+        const truncated = Boolean(it.truncated) && fs.existsSync(path.join(this.textsDir, `${it.id}.txt`))
+        return {
+          id: it.id,
+          text: typeof it.text === 'string' ? it.text : '',
+          kind: it.kind || 'text',
+          image: it.image,
+          hash: it.hash,
+          pinned: Boolean(it.pinned),
+          createdAt: Number(it.createdAt) || Date.now(),
+          copiedCount: Number(it.copiedCount) || 0,
+          truncated: truncated || undefined,
+        }
+      })
       .filter((it) => it.kind !== 'image' || this.imageFileExists(it))
       .slice(0, MAX_ITEMS)
   }
@@ -88,6 +95,7 @@ class ClipStore {
       if (index === -1) index = this.items.length - 1
       const [removed] = this.items.splice(index, 1)
       if (removed.kind === 'image') this.deleteImageFile(removed)
+      this.deleteTextFile(removed)
     }
   }
 
@@ -115,25 +123,57 @@ class ClipStore {
   add(text) {
     const trimmed = text.trim()
     if (!trimmed) return false
-    const existing = this.items.findIndex((it) => it.text === trimmed)
+    const oversized = trimmed.length > MAX_TEXT_LENGTH
+    const preview = oversized ? trimmed.slice(0, MAX_TEXT_PREVIEW) : trimmed
+    const existing = this.items.findIndex((it) => it.text === preview)
     if (existing >= 0) {
       const [item] = this.items.splice(existing, 1)
       item.createdAt = Date.now()
       this.items.unshift(item)
     } else {
+      const id = randomUUID()
+      if (oversized) {
+        try {
+          fs.mkdirSync(this.textsDir, { recursive: true })
+          fs.writeFileSync(path.join(this.textsDir, `${id}.txt`), text, 'utf8')
+        } catch (err) {
+          console.error('[store] 长文本写入失败', err)
+        }
+      }
       this.items.unshift({
-        id: randomUUID(),
-        text: trimmed,
-        kind: detectKind(trimmed),
+        id,
+        text: preview,
+        kind: detectKind(preview),
         pinned: false,
         createdAt: Date.now(),
         copiedCount: 0,
+        truncated: oversized || undefined,
       })
     }
     this.sort()
     this.enforceItemLimit()
     this.persist()
     return true
+  }
+
+  getFullText(id) {
+    const item = this.items.find((it) => it.id === id)
+    if (!item) return null
+    if (!item.truncated) return item.text
+    try {
+      return fs.readFileSync(path.join(this.textsDir, `${id}.txt`), 'utf8')
+    } catch {
+      return item.text
+    }
+  }
+
+  deleteTextFile(item) {
+    if (!item || !item.truncated) return
+    try {
+      fs.unlinkSync(path.join(this.textsDir, `${item.id}.txt`))
+    } catch {
+      // 文件已不存在时忽略
+    }
   }
 
   addFiles(paths) {
@@ -165,18 +205,32 @@ class ClipStore {
     fs.mkdirSync(dir, { recursive: true })
     const imagesOut = path.join(dir, 'images')
     if (this.items.some((it) => it.kind === 'image')) fs.mkdirSync(imagesOut, { recursive: true })
+    const textsOut = path.join(dir, 'texts')
+    if (this.items.some((it) => it.truncated)) fs.mkdirSync(textsOut, { recursive: true })
 
     for (const item of this.items) {
-      if (item.kind !== 'image' || !item.image) continue
-      for (const name of [item.image.file, item.image.thumbFile]) {
-        if (!name) continue
-        const from = path.join(this.imagesDir, name)
-        const to = path.join(imagesOut, name)
+      if (item.kind === 'image' && item.image) {
+        for (const name of [item.image.file, item.image.thumbFile]) {
+          if (!name) continue
+          const from = path.join(this.imagesDir, name)
+          const to = path.join(imagesOut, name)
+          if (fs.existsSync(from) && !fs.existsSync(to)) {
+            try {
+              fs.copyFileSync(from, to)
+            } catch (err) {
+              console.error('[export] 图片复制失败', err)
+            }
+          }
+        }
+      }
+      if (item.truncated) {
+        const from = path.join(this.textsDir, `${item.id}.txt`)
+        const to = path.join(textsOut, `${item.id}.txt`)
         if (fs.existsSync(from) && !fs.existsSync(to)) {
           try {
             fs.copyFileSync(from, to)
           } catch (err) {
-            console.error('[export] 图片复制失败', err)
+            console.error('[export] 长文本复制失败', err)
           }
         }
       }
@@ -194,6 +248,7 @@ class ClipStore {
     const raw = JSON.parse(fs.readFileSync(path.join(dir, 'clips.json'), 'utf8'))
     const incoming = Array.isArray(raw) ? raw : Array.isArray(raw.items) ? raw.items : []
     const imagesIn = path.join(dir, 'images')
+    const textsIn = path.join(dir, 'texts')
     let added = 0
     let skipped = 0
 
@@ -244,13 +299,30 @@ class ClipStore {
         skipped += 1
         continue
       }
+      const newId = randomUUID()
+      let truncated = Boolean(entry.truncated)
+      if (truncated) {
+        const source = path.join(textsIn, `${entry.id}.txt`)
+        if (!fs.existsSync(source)) {
+          truncated = false
+        } else {
+          try {
+            fs.mkdirSync(this.textsDir, { recursive: true })
+            fs.copyFileSync(source, path.join(this.textsDir, `${newId}.txt`))
+          } catch (err) {
+            console.error('[import] 长文本复制失败', err)
+            truncated = false
+          }
+        }
+      }
       this.items.push({
-        id: randomUUID(),
+        id: newId,
         text,
         kind: entry.kind || detectKind(text),
         pinned: Boolean(entry.pinned),
         createdAt: Number(entry.createdAt) || Date.now(),
         copiedCount: Number(entry.copiedCount) || 0,
+        truncated: truncated || undefined,
       })
       added += 1
     }
@@ -268,7 +340,7 @@ class ClipStore {
       existing.createdAt = Date.now()
       this.sort()
       this.persist()
-      return false
+      return true
     }
 
     const file = `${hash}.png`
@@ -355,6 +427,7 @@ class ClipStore {
     if (index === -1) return this.items
     const [removed] = this.items.splice(index, 1)
     this.deleteImageFile(removed)
+    this.deleteTextFile(removed)
     this.persist()
     return this.items
   }
@@ -382,6 +455,7 @@ class ClipStore {
     this.items = []
     for (const item of removed) {
       if (item.kind === 'image') this.deleteImageFile(item)
+      this.deleteTextFile(item)
     }
     this.persist()
     return this.items
