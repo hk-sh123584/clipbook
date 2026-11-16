@@ -24,29 +24,46 @@ class ClipStore {
     this.read()
   }
 
+  normalizeItems(data) {
+    if (!Array.isArray(data)) return []
+    return data
+      .filter((it) => it && typeof it.id === 'string' && (typeof it.text === 'string' || it.kind === 'image'))
+      .map((it) => ({
+        id: it.id,
+        text: typeof it.text === 'string' ? it.text : '',
+        kind: it.kind || 'text',
+        image: it.image,
+        hash: it.hash,
+        pinned: Boolean(it.pinned),
+        createdAt: Number(it.createdAt) || Date.now(),
+        copiedCount: Number(it.copiedCount) || 0,
+      }))
+      .filter((it) => it.kind !== 'image' || this.imageFileExists(it))
+      .slice(0, MAX_ITEMS)
+  }
+
   read() {
+    let parsed
     try {
-      const data = JSON.parse(fs.readFileSync(this.file, 'utf8'))
-      if (Array.isArray(data)) {
-        this.items = data
-          .filter((it) => it && typeof it.id === 'string' && (typeof it.text === 'string' || it.kind === 'image'))
-          .map((it) => ({
-            id: it.id,
-            text: typeof it.text === 'string' ? it.text : '',
-            kind: it.kind || 'text',
-            image: it.image,
-            hash: it.hash,
-            pinned: Boolean(it.pinned),
-            createdAt: Number(it.createdAt) || Date.now(),
-            copiedCount: Number(it.copiedCount) || 0,
-          }))
-          .filter((it) => it.kind !== 'image' || this.imageFileExists(it))
-          .slice(0, MAX_ITEMS)
-      }
+      parsed = JSON.parse(fs.readFileSync(this.file, 'utf8'))
     } catch {
-      this.items = []
+      // 主文件损坏，尝试从备份恢复
+      try {
+        parsed = JSON.parse(fs.readFileSync(this.backupFile, 'utf8'))
+        fs.copyFileSync(this.backupFile, this.file)
+        console.warn('[store] 主文件损坏，已从备份恢复')
+      } catch {
+        // 备份也损坏，将损坏文件另存以防被覆盖丢失
+        try {
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+          fs.renameSync(this.file, `${this.file}.corrupt-${stamp}`)
+        } catch {}
+        parsed = []
+      }
     }
+    this.items = this.normalizeItems(parsed)
     this.sort()
+    this.enforceItemLimit()
     this.enforceImageLimit()
   }
 
@@ -56,6 +73,22 @@ class ClipStore {
 
   sort() {
     this.items.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.createdAt - a.createdAt)
+  }
+
+  enforceItemLimit() {
+    while (this.items.length > MAX_ITEMS) {
+      // 优先淘汰非 pinned 项，全部 pinned 时才淘汰最旧的 pinned 项
+      let index = -1
+      for (let i = this.items.length - 1; i >= 0; i--) {
+        if (!this.items[i].pinned) {
+          index = i
+          break
+        }
+      }
+      if (index === -1) index = this.items.length - 1
+      const [removed] = this.items.splice(index, 1)
+      if (removed.kind === 'image') this.deleteImageFile(removed)
+    }
   }
 
   persist() {
@@ -96,9 +129,9 @@ class ClipStore {
         createdAt: Date.now(),
         copiedCount: 0,
       })
-      if (this.items.length > MAX_ITEMS) this.items.length = MAX_ITEMS
     }
     this.sort()
+    this.enforceItemLimit()
     this.persist()
     return true
   }
@@ -121,9 +154,9 @@ class ClipStore {
         createdAt: Date.now(),
         copiedCount: 0,
       })
-      if (this.items.length > MAX_ITEMS) this.items.length = MAX_ITEMS
     }
     this.sort()
+    this.enforceItemLimit()
     this.persist()
     return true
   }
@@ -223,7 +256,7 @@ class ClipStore {
     }
 
     this.sort()
-    if (this.items.length > MAX_ITEMS) this.items.length = MAX_ITEMS
+    this.enforceItemLimit()
     this.enforceImageLimit()
     this.persist()
     return { added, skipped }
@@ -268,11 +301,8 @@ class ClipStore {
       createdAt: Date.now(),
       copiedCount: 0,
     })
-    if (this.items.length > MAX_ITEMS) {
-      const dropped = this.items.pop()
-      this.deleteImageFile(dropped)
-    }
     this.sort()
+    this.enforceItemLimit()
     this.enforceImageLimit()
     this.persist()
     return true

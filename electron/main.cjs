@@ -54,6 +54,19 @@ function broadcast() {
   }
 }
 
+function resetClipboardTrackers() {
+  lastText = ''
+  lastImageKey = ''
+  lastFilesKey = ''
+}
+
+function clearHistory() {
+  store.clear()
+  // 清空后若剪贴板仍有内容，下一轮轮询应重新记录
+  resetClipboardTrackers()
+  broadcast()
+}
+
 function assetPath(name) {
   return path.join(__dirname, '..', 'assets', name)
 }
@@ -354,7 +367,7 @@ function refreshTrayMenu() {
       { label: '导出记录…', click: () => { exportRecords() } },
       { label: '导入记录…', click: () => { importRecords() } },
       { type: 'separator' },
-      { label: '清空历史', click: () => { store.clear(); broadcast() } },
+      { label: '清空历史', click: () => clearHistory() },
       { type: 'separator' },
       { label: '退出', click: () => { app.isQuitting = true; app.quit() } },
     ]),
@@ -445,7 +458,14 @@ function registerIpc() {
   })
 
   ipcMain.handle('clips:delete', (_event, id) => {
+    const removed = store.items.find((it) => it.id === id)
     const items = store.remove(id)
+    // 删除后若该项仍在剪贴板上，下一轮轮询应重新记录
+    if (removed) {
+      if (removed.kind === 'image') lastImageKey = ''
+      else if (removed.kind === 'file') lastFilesKey = ''
+      else lastText = ''
+    }
     broadcast()
     return items
   })
@@ -457,9 +477,8 @@ function registerIpc() {
   })
 
   ipcMain.handle('clips:clear', () => {
-    const items = store.clear()
-    broadcast()
-    return items
+    clearHistory()
+    return store.items
   })
 
   ipcMain.handle('window:hide', () => {
