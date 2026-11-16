@@ -24,6 +24,8 @@ class ClipStore {
     this.textsDir = path.join(dir, 'texts')
     this.items = []
     this.saveTimer = null
+    // 清空后暂存被移除的记录，撤销窗口内可恢复，窗口结束才真正删文件
+    this.pendingClear = null
     this.read()
   }
 
@@ -80,7 +82,8 @@ class ClipStore {
   }
 
   sort() {
-    this.items.sort((a, b) => Number(b.top) - Number(a.top) || b.createdAt - a.createdAt)
+    // top 为 undefined 时 Number() 会得到 NaN，比较函数返回 NaN 会被当成 0，置顶项就不会上移
+    this.items.sort((a, b) => (b.top ? 1 : 0) - (a.top ? 1 : 0) || b.createdAt - a.createdAt)
   }
 
   enforceItemLimit() {
@@ -433,6 +436,19 @@ class ClipStore {
     return this.items
   }
 
+  removeMany(ids) {
+    const targets = new Set(ids)
+    if (!targets.size) return this.items
+    const removed = this.items.filter((it) => targets.has(it.id))
+    this.items = this.items.filter((it) => !targets.has(it.id))
+    for (const item of removed) {
+      if (item.kind === 'image') this.deleteImageFile(item)
+      this.deleteTextFile(item)
+    }
+    this.persist()
+    return this.items
+  }
+
   togglePin(id) {
     const item = this.items.find((it) => it.id === id)
     if (item) {
@@ -463,14 +479,50 @@ class ClipStore {
   }
 
   clear() {
+    // 若上一次清空还在撤销窗口内，先落地删除旧快照
+    this.commitClear()
     const removed = this.items.filter((it) => !it.pinned)
     this.items = this.items.filter((it) => it.pinned)
-    for (const item of removed) {
+    this.pendingClear = removed.length ? removed : null
+    this.persist()
+    return this.items
+  }
+
+  undoClear() {
+    const pending = this.pendingClear
+    if (!pending) return this.items
+    this.pendingClear = null
+
+    for (const item of pending) {
+      if (item.kind === 'image') {
+        if (!this.imageFileExists(item)) continue
+        if (this.items.some((it) => it.kind === 'image' && it.hash === item.hash)) continue
+      } else if (this.items.some((it) => it.kind !== 'image' && it.text === item.text)) {
+        // 清空后剪贴板轮询可能已重新录入了同样内容，避免重复
+        continue
+      }
+      if (item.truncated && !fs.existsSync(path.join(this.textsDir, `${item.id}.txt`))) {
+        item.truncated = undefined
+      }
+      this.items.push(item)
+    }
+
+    this.sort()
+    this.enforceItemLimit()
+    this.enforceImageLimit()
+    this.persist()
+    return this.items
+  }
+
+  // 撤销窗口结束（或应用退出）时真正删除被清空的图片与长文本文件
+  commitClear() {
+    const pending = this.pendingClear
+    this.pendingClear = null
+    if (!pending) return
+    for (const item of pending) {
       if (item.kind === 'image') this.deleteImageFile(item)
       this.deleteTextFile(item)
     }
-    this.persist()
-    return this.items
   }
 }
 

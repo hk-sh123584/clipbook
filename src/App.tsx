@@ -59,18 +59,32 @@ function formatTime(ts: number) {
 export default function App() {
   const [items, setItems] = useState<ClipItem[]>([])
   const [query, setQuery] = useState('')
+  const [searchText, setSearchText] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [active, setActive] = useState(0)
   const [confirming, setConfirming] = useState(false)
   const [notice, setNotice] = useState('')
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [preview, setPreview] = useState<ClipItem | null>(null)
+  const [undo, setUndo] = useState<{ count: number; left: number } | null>(null)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selected, setSelected] = useState<string[]>([])
+  const [confirmingBatch, setConfirmingBatch] = useState(false)
+  const [onTop, setOnTop] = useState(false)
+  const selectedSet = useMemo(() => new Set(selected), [selected])
   const copiedTimer = useRef<number | undefined>(undefined)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<VariableSizeList>(null)
   const resizeStart = useRef<{ x: number; y: number; width: number; height: number } | null>(null)
 
+  // 搜索防抖：输入 200ms 后才真正过滤，避免大量记录时每次按键全量扫描
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearchText(query), 200)
+    return () => window.clearTimeout(timer)
+  }, [query])
+
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const q = searchText.trim().toLowerCase()
     return items.filter((item) => {
       if (filter === 'link' && item.kind !== 'link') return false
       if (filter === 'image' && item.kind !== 'image') return false
@@ -79,16 +93,20 @@ export default function App() {
       if (!q) return true
       return item.text.toLowerCase().includes(q)
     })
-  }, [items, query, filter])
+  }, [items, searchText, filter])
 
   useEffect(() => {
     const api = window.clipbook
     if (!api) return
     api.list().then(setItems)
+    api.info().then((info) => setOnTop(info.alwaysOnTop)).catch(() => {})
     const offUpdate = api.onUpdate(setItems)
     const offShown = api.onShown(() => {
       setQuery('')
+      setSearchText('')
       setActive(0)
+      setPreview(null)
+      setUndo(null)
       window.setTimeout(() => inputRef.current?.focus(), 30)
     })
     window.setTimeout(() => inputRef.current?.focus(), 60)
@@ -101,6 +119,8 @@ export default function App() {
   useEffect(() => {
     setActive(0)
     setConfirming(false)
+    setSelected([])
+    setConfirmingBatch(false)
     listRef.current?.scrollTo(0)
   }, [query, filter])
 
@@ -123,6 +143,25 @@ export default function App() {
     const timer = window.setTimeout(() => setConfirming(false), 3000)
     return () => window.clearTimeout(timer)
   }, [confirming])
+
+  const undoing = undo !== null
+  useEffect(() => {
+    if (!undoing) return
+    const timer = window.setInterval(() => {
+      setUndo((state) => {
+        if (!state) return state
+        if (state.left <= 1) return null
+        return { ...state, left: state.left - 1 }
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [undoing])
+
+  useEffect(() => {
+    if (!confirmingBatch) return
+    const timer = window.setTimeout(() => setConfirmingBatch(false), 3000)
+    return () => window.clearTimeout(timer)
+  }, [confirmingBatch])
 
   const copyItem = async (id: string) => {
     const api = window.clipbook
@@ -162,9 +201,64 @@ export default function App() {
       setConfirming(true)
       return
     }
+    const removedCount = items.filter((item) => !item.pinned).length
     const next = await api.clear()
     setItems(next)
     setConfirming(false)
+    if (removedCount > 0) setUndo({ count: removedCount, left: 10 })
+    else setNotice('没有可清空的记录')
+  }
+
+  const undoClear = async () => {
+    const api = window.clipbook
+    if (!api) return
+    const next = await api.undoClear()
+    setItems(next)
+    setUndo(null)
+    setNotice('已撤销清空')
+  }
+
+  const toggleWindowTop = async () => {
+    const api = window.clipbook
+    if (!api) return
+    setOnTop(await api.toggleAlwaysOnTop())
+  }
+
+  const exitSelect = () => {
+    setSelectMode(false)
+    setSelected([])
+    setConfirmingBatch(false)
+  }
+
+  const enterSelect = () => {
+    setSelectMode(true)
+    setSelected([])
+    setConfirmingBatch(false)
+    setPreview(null)
+  }
+
+  const toggleSelect = (id: string) => {
+    setConfirmingBatch(false)
+    setSelected((list) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]))
+  }
+
+  const selectAllFiltered = () => {
+    setSelected(filtered.map((item) => item.id))
+    setConfirmingBatch(false)
+  }
+
+  const deleteSelected = async () => {
+    const api = window.clipbook
+    if (!api || !selected.length) return
+    if (!confirmingBatch) {
+      setConfirmingBatch(true)
+      return
+    }
+    const count = selected.length
+    const next = await api.removeMany(selected)
+    setItems(next)
+    setNotice(`已删除 ${count} 条`)
+    exitSelect()
   }
 
   const exportData = async () => {
@@ -191,12 +285,22 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
-        if (query) {
+        if (preview) {
+          setPreview(null)
+        } else if (selectMode) {
+          exitSelect()
+        } else if (query) {
           setQuery('')
+          setSearchText('')
           inputRef.current?.focus()
         } else {
           window.clipbook?.hide()
         }
+        return
+      }
+      if (selectMode && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+        event.preventDefault()
+        selectAllFiltered()
         return
       }
       if (event.key === 'ArrowDown') {
@@ -222,7 +326,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [filtered, active, query])
+  }, [filtered, active, query, preview, selectMode])
 
   const pinnedCount = items.filter((item) => item.pinned).length
 
@@ -233,6 +337,14 @@ export default function App() {
         <h1>剪贴簿</h1>
         <span className="hotkey">Ctrl+Shift+V</span>
         <div className="window-controls">
+          <button
+            type="button"
+            className={`top-toggle ${onTop ? 'on' : ''}`}
+            title={onTop ? '取消窗口置顶' : '窗口置顶'}
+            onClick={toggleWindowTop}
+          >
+            {onTop ? '📌' : '📍'}
+          </button>
           <button type="button" title="最小化到托盘" onClick={() => window.clipbook?.control('minimize')}>
             −
           </button>
@@ -280,6 +392,14 @@ export default function App() {
           </button>
         ))}
         <span className="filter-gap" />
+        <button
+          type="button"
+          className={`chip action ${selectMode ? 'on' : ''}`}
+          title={selectMode ? '退出多选' : '多选后批量删除'}
+          onClick={() => (selectMode ? exitSelect() : enterSelect())}
+        >
+          {selectMode ? '完成' : '多选'}
+        </button>
         <button type="button" className="chip action" title="导出到文件夹" onClick={exportData}>
           导出
         </button>
@@ -318,12 +438,17 @@ export default function App() {
                   return (
                     <div
                       data-index={index}
-                      className={`row ${index === active ? 'active' : ''} ${item.pinned ? 'pinned' : ''}`}
+                      className={`row ${index === active ? 'active' : ''} ${item.pinned ? 'pinned' : ''} ${selectedSet.has(item.id) ? 'selected' : ''}`}
                       style={{ ...style, width: 'calc(100% - 12px)' }}
                       onMouseEnter={() => setActive(index)}
-                      onClick={() => copyItem(item.id)}
+                      onClick={() => (selectMode ? toggleSelect(item.id) : copyItem(item.id))}
                     >
                       <div className="meta">
+                        {selectMode && (
+                          <span className={`pick ${selectedSet.has(item.id) ? 'on' : ''}`}>
+                            {selectedSet.has(item.id) ? '✓' : ''}
+                          </span>
+                        )}
                         <span className="time">{formatTime(item.createdAt)}</span>
                         {KIND_LABEL[item.kind] && <span className="tag">{KIND_LABEL[item.kind]}</span>}
                         {item.truncated && <span className="tag">超长</span>}
@@ -338,7 +463,15 @@ export default function App() {
                         {item.pinned && <span className="pin-dot" title="已收藏" />}
                       </div>
                       {item.kind === 'image' && item.image ? (
-                        <div className="shot">
+                        <div
+                          className="shot"
+                          title={selectMode ? '点击选择这条' : '点击放大预览'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            if (selectMode) toggleSelect(item.id)
+                            else setPreview(item)
+                          }}
+                        >
                           <img
                             src={`clipimg://img/${item.image.thumbFile || item.image.file}`}
                             alt="剪贴图片"
@@ -349,42 +482,44 @@ export default function App() {
                       ) : (
                         <p className="text">{item.text}</p>
                       )}
-                      <div className="actions">
-                        <button
-                          type="button"
-                          className={item.pinned ? 'starred' : ''}
-                          title={item.pinned ? '取消收藏' : '收藏（锁定不被清理）'}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            togglePin(item.id)
-                          }}
-                        >
-                          {item.pinned ? '★' : '☆'}
-                        </button>
-                        {item.pinned && (
+                      {!selectMode && (
+                        <div className="actions">
                           <button
                             type="button"
-                            className={item.top ? 'topped' : ''}
-                            title={item.top ? '取消置顶' : '置顶到列表顶部'}
+                            className={item.pinned ? 'starred' : ''}
+                            title={item.pinned ? '取消收藏' : '收藏（锁定不被清理）'}
                             onClick={(event) => {
                               event.stopPropagation()
-                              toggleTop(item.id)
+                              togglePin(item.id)
                             }}
                           >
-                            {item.top ? '📌' : '📍'}
+                            {item.pinned ? '★' : '☆'}
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          title="删除这条"
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            removeItem(item.id)
-                          }}
-                        >
-                          ✕
-                        </button>
-                      </div>
+                          {item.pinned && (
+                            <button
+                              type="button"
+                              className={item.top ? 'topped' : ''}
+                              title={item.top ? '取消置顶' : '置顶到列表顶部'}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                toggleTop(item.id)
+                              }}
+                            >
+                              {item.top ? '📌' : '📍'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            title="删除这条"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              removeItem(item.id)
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )
                 }}
@@ -394,12 +529,66 @@ export default function App() {
         </div>
       )}
 
+      {undo && (
+        <div className="undo-float">
+          <button type="button" onClick={undoClear}>
+            撤销清空（{undo.left}s）· 共 {undo.count} 条
+          </button>
+        </div>
+      )}
+
+      {selectMode && (
+        <div className="select-bar">
+          <span>已选 {selected.length} 条</span>
+          <div className="select-actions">
+            <button type="button" onClick={selectAllFiltered}>
+              全选
+            </button>
+            <button
+              type="button"
+              className={`danger ${selected.length === 0 ? 'disabled' : ''}`}
+              disabled={selected.length === 0}
+              onClick={deleteSelected}
+            >
+              {confirmingBatch ? `确认删除 ${selected.length} 条` : '删除选中'}
+            </button>
+            <button type="button" onClick={exitSelect}>
+              退出
+            </button>
+          </div>
+        </div>
+      )}
+
       <footer className="foot">
         <span className={notice ? 'notice' : ''}>
           {notice || `共 ${items.length} 条${pinnedCount > 0 ? ` · 收藏 ${pinnedCount}` : ''}`}
         </span>
-        <span>↑↓ 选择 · Enter 复制 · Esc 收起</span>
+        <span>
+          {selectMode ? '点击选择 · Ctrl+A 全选 · Esc 退出多选' : '↑↓ 选择 · Enter 复制 · Esc 收起'}
+        </span>
       </footer>
+
+      {preview && preview.image && (
+        <div className="lightbox" onClick={() => setPreview(null)}>
+          <img
+            src={`clipimg://img/${preview.image.file}`}
+            alt="图片预览"
+            draggable={false}
+            onClick={(event) => event.stopPropagation()}
+          />
+          <div className="lightbox-bar" onClick={(event) => event.stopPropagation()}>
+            <span className="lightbox-meta">
+              {preview.image.width} × {preview.image.height} · {Math.max(1, Math.round(preview.image.bytes / 1024))} KB
+            </span>
+            <button type="button" onClick={() => copyItem(preview.id)}>
+              复制图片
+            </button>
+            <button type="button" onClick={() => setPreview(null)}>
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
 
       <div
         className="resize-grip"

@@ -25,6 +25,7 @@ export interface AppInfo {
   hotkey: string
   version: string
   dataFile: string
+  alwaysOnTop: boolean
 }
 
 export interface ImportResult {
@@ -40,12 +41,15 @@ export interface ClipbookApi {
   list: () => Promise<ClipItem[]>
   copy: (id: string) => Promise<ClipItem[]>
   remove: (id: string) => Promise<ClipItem[]>
+  removeMany: (ids: string[]) => Promise<ClipItem[]>
   togglePin: (id: string) => Promise<ClipItem[]>
   toggleTop: (id: string) => Promise<ClipItem[]>
   clear: () => Promise<ClipItem[]>
+  undoClear: () => Promise<ClipItem[]>
   hide: () => Promise<void>
   resize: (width: number, height: number) => void
   control: (action: 'minimize' | 'maximize' | 'close') => void
+  toggleAlwaysOnTop: () => Promise<boolean>
   info: () => Promise<AppInfo>
   exportData: () => Promise<ImportResult>
   importData: () => Promise<ImportResult>

@@ -127,6 +127,20 @@ button {
   background: rgba(43, 42, 38, 0.08);
 }
 
+.window-controls button.top-toggle {
+  font-size: 12px;
+  opacity: 0.5;
+}
+
+.window-controls button.top-toggle:hover {
+  opacity: 1;
+}
+
+.window-controls button.top-toggle.on {
+  opacity: 1;
+  background: rgba(166, 58, 43, 0.1);
+}
+
 .window-controls .window-close:hover {
   color: #fff;
   background: var(--seal);
@@ -239,6 +253,113 @@ button {
   color: var(--seal);
 }
 
+/* 清空撤销：浮在页面下方的实心按钮 */
+.undo-float {
+  position: absolute;
+  left: 50%;
+  bottom: 44px;
+  z-index: 15;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.undo-float button {
+  pointer-events: auto;
+  padding: 9px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: var(--seal);
+  color: #fff;
+  font-family: var(--font-serif);
+  font-size: 12.5px;
+  letter-spacing: 1.5px;
+  white-space: nowrap;
+  box-shadow: 0 8px 20px rgba(120, 38, 26, 0.38);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.undo-float button:hover {
+  background: #8f3225;
+  transform: translateY(-1px);
+}
+
+.undo-float button:active {
+  transform: translateY(0);
+}
+
+/* 多选操作条 */
+.select-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 18px 6px;
+  padding: 5px 8px 5px 10px;
+  border: 1px solid var(--seal);
+  border-radius: 4px;
+  background: rgba(166, 58, 43, 0.06);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.select-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.select-actions button {
+  font-family: var(--font-serif);
+  font-size: 11.5px;
+  letter-spacing: 1px;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.select-actions button:hover {
+  color: var(--seal);
+  border-color: var(--seal);
+}
+
+.select-actions button.danger {
+  color: #fff;
+  background: var(--seal);
+  border-color: var(--seal);
+}
+
+.select-actions button.disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.row.selected {
+  background: rgba(166, 58, 43, 0.08);
+}
+
+.pick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--ink-soft);
+  border-radius: 2px;
+  font-family: var(--font-sans);
+  font-size: 9px;
+  line-height: 1;
+  color: transparent;
+}
+
+.pick.on {
+  color: #fff;
+  background: var(--seal);
+  border-color: var(--seal);
+}
+
 /* 列表 */
 .list-area {
   flex: 1;
@@ -337,6 +458,7 @@ button {
   display: flex;
   justify-content: flex-start;
   height: 110px;
+  cursor: zoom-in;
 }
 
 .shot img {
@@ -466,4 +588,62 @@ button {
 
 .resize-grip:hover {
   opacity: 0.9;
+}
+
+/* 图片放大预览 */
+.lightbox {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(24, 20, 14, 0.88);
+  cursor: zoom-out;
+}
+
+.lightbox img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100% - 40px);
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: rgba(245, 239, 224, 0.75);
+  cursor: default;
+}
+
+.lightbox-meta {
+  margin-right: 4px;
+}
+
+.lightbox-bar button {
+  font-family: var(--font-serif);
+  font-size: 11.5px;
+  letter-spacing: 1px;
+  color: var(--paper);
+  border: 1px solid rgba(245, 239, 224, 0.45);
+  border-radius: 3px;
+  padding: 2px 9px;
+}
+
+.lightbox-bar button:hover {
+  color: #fff;
+  border-color: var(--paper);
+  background: rgba(245, 239, 224, 0.12);
 }

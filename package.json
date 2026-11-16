@@ -1,6 +1,6 @@
 {
   "name": "clipbook",
-  "version": "1.5.3",
+  "version": "1.5.5",
   "description": "本地剪贴板历史管理器",
   "main": "electron/main.cjs",
   "private": true,

@@ -22,6 +22,7 @@ const { ClipStore } = require('./store.cjs')
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL)
 const HOTKEY = 'Control+Shift+V'
 const HIDDEN_WINDOW_TTL = 5000
+const CLEAR_UNDO_TTL = 10000
 
 let win = null
 let tray = null
@@ -31,8 +32,10 @@ let lastImageKey = ''
 let lastFilesKey = ''
 let pollTimer = null
 let hiddenWindowTimer = null
+let clearUndoTimer = null
 let savedWindowBounds = null
 let savedWindowMaximized = false
+let alwaysOnTop = false
 let showWindowWhenReady = false
 
 protocol.registerSchemesAsPrivileged([
@@ -54,16 +57,52 @@ function broadcast() {
   }
 }
 
-function resetClipboardTrackers() {
-  lastText = ''
-  lastImageKey = ''
+// 把追踪状态对齐到“剪贴板当前内容”，而不是清空。
+// 清空/删除后若置空追踪，下一轮轮询会把剪贴板上残留的内容当成新内容重新录回来。
+function syncClipboardTrackers() {
+  const files = readClipboardFiles()
+  if (files.length) {
+    lastFilesKey = files.join('|')
+    lastText = ''
+    lastImageKey = ''
+    return
+  }
+  const text = clipboard.readText()
   lastFilesKey = ''
+  if (text) {
+    lastText = text
+    lastImageKey = ''
+    return
+  }
+  lastText = ''
+  if (clipboard.availableFormats().some((format) => format.startsWith('image/'))) {
+    const image = clipboard.readImage()
+    lastImageKey = image.isEmpty() ? '' : imageKey(image).key
+  } else {
+    lastImageKey = ''
+  }
 }
 
 function clearHistory() {
   store.clear()
-  // 清空后若剪贴板仍有内容，下一轮轮询应重新记录
-  resetClipboardTrackers()
+  // 清空只删记录，不把剪贴板上现有内容重新录回
+  syncClipboardTrackers()
+  broadcast()
+  // 撤销窗口结束后才真正删除被清空的图片与长文本
+  if (clearUndoTimer) clearTimeout(clearUndoTimer)
+  clearUndoTimer = setTimeout(() => {
+    clearUndoTimer = null
+    store.commitClear()
+  }, CLEAR_UNDO_TTL)
+}
+
+function undoClear() {
+  if (clearUndoTimer) {
+    clearTimeout(clearUndoTimer)
+    clearUndoTimer = null
+  }
+  store.undoClear()
+  syncClipboardTrackers()
   broadcast()
 }
 
@@ -155,11 +194,19 @@ function pollClipboard() {
   if (text) {
     if (text !== lastText) {
       lastText = text
+      // 文字变了，之前记下的图片 / 文件标记失效，否则再次复制同样内容不会被记录
+      lastImageKey = ''
+      lastFilesKey = ''
       if (store.add(text)) broadcast()
     }
     return
   }
-  if (!clipboard.availableFormats().some((format) => format.startsWith('image/'))) return
+  if (!clipboard.availableFormats().some((format) => format.startsWith('image/'))) {
+    // 剪贴板为空，清掉标记，之后重新复制同样内容仍能记录
+    lastText = ''
+    lastFilesKey = ''
+    return
+  }
 
   const image = clipboard.readImage()
   if (image.isEmpty()) return
@@ -167,6 +214,8 @@ function pollClipboard() {
   if (info.key === lastImageKey) return
 
   lastImageKey = info.key
+  lastText = ''
+  lastFilesKey = ''
   const thumbnail = createThumbnail(image).toPNG()
   if (store.addImage(image.toPNG(), info.hash, info.width, info.height, thumbnail)) broadcast()
 }
@@ -185,7 +234,7 @@ function createWindow() {
     maximizable: true,
     fullscreenable: false,
     skipTaskbar: true,
-    alwaysOnTop: true,
+    alwaysOnTop,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -447,11 +496,14 @@ function registerIpc() {
       if (image.isEmpty()) return store.items
       clipboard.writeImage(image)
       lastText = ''
+      lastFilesKey = ''
       lastImageKey = imageKey(image).key
     } else {
       const fullText = store.getFullText(id) || item.text
       clipboard.writeText(fullText)
       lastText = fullText
+      lastFilesKey = ''
+      lastImageKey = ''
     }
 
     store.markCopied(id)
@@ -459,16 +511,19 @@ function registerIpc() {
   })
 
   ipcMain.handle('clips:delete', (_event, id) => {
-    const removed = store.items.find((it) => it.id === id)
     const items = store.remove(id)
-    // 删除后若该项仍在剪贴板上，下一轮轮询应重新记录
-    if (removed) {
-      if (removed.kind === 'image') lastImageKey = ''
-      else if (removed.kind === 'file') lastFilesKey = ''
-      else lastText = ''
-    }
+    // 删掉的记录不应在下一轮轮询被重新录回
+    syncClipboardTrackers()
     broadcast()
     return items
+  })
+
+  ipcMain.handle('clips:deleteMany', (_event, ids) => {
+    if (!Array.isArray(ids) || !ids.length) return store.items
+    store.removeMany(ids)
+    syncClipboardTrackers()
+    broadcast()
+    return store.items
   })
 
   ipcMain.handle('clips:togglePin', (_event, id) => {
@@ -488,8 +543,21 @@ function registerIpc() {
     return store.items
   })
 
+  ipcMain.handle('clips:undoClear', () => {
+    undoClear()
+    return store.items
+  })
+
   ipcMain.handle('window:hide', () => {
     hideWindow()
+  })
+
+  ipcMain.handle('window:alwaysOnTop', () => {
+    if (win && !win.isDestroyed()) {
+      alwaysOnTop = !win.isAlwaysOnTop()
+      win.setAlwaysOnTop(alwaysOnTop)
+    }
+    return alwaysOnTop
   })
 
   ipcMain.on('window:control', (_event, action) => {
@@ -526,6 +594,7 @@ function registerIpc() {
     hotkey: HOTKEY,
     version: app.getVersion(),
     dataFile: store.file,
+    alwaysOnTop: Boolean(win && !win.isDestroyed() && win.isAlwaysOnTop()),
   }))
 
   ipcMain.handle('data:export', () => exportRecords())
@@ -560,6 +629,11 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   if (pollTimer) clearInterval(pollTimer)
   if (hiddenWindowTimer) clearTimeout(hiddenWindowTimer)
+  if (clearUndoTimer) clearTimeout(clearUndoTimer)
   globalShortcut.unregisterAll()
-  if (store) store.flush()
+  if (store) {
+    // 退出时未撤销的清空立即落地，避免遗孤图片与长文本文件
+    store.commitClear()
+    store.flush()
+  }
 })
