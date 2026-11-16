@@ -103,6 +103,132 @@ class ClipStore {
     return true
   }
 
+  addFiles(paths) {
+    const list = (paths || []).map((item) => String(item).trim()).filter(Boolean)
+    if (!list.length) return false
+    const text = list.join('\n')
+    const existing = this.items.findIndex((it) => it.kind === 'file' && it.text === text)
+    if (existing >= 0) {
+      const [item] = this.items.splice(existing, 1)
+      item.createdAt = Date.now()
+      this.items.unshift(item)
+    } else {
+      this.items.unshift({
+        id: randomUUID(),
+        text,
+        kind: 'file',
+        pinned: false,
+        createdAt: Date.now(),
+        copiedCount: 0,
+      })
+      if (this.items.length > MAX_ITEMS) this.items.length = MAX_ITEMS
+    }
+    this.sort()
+    this.persist()
+    return true
+  }
+
+  exportTo(dir) {
+    fs.mkdirSync(dir, { recursive: true })
+    const imagesOut = path.join(dir, 'images')
+    if (this.items.some((it) => it.kind === 'image')) fs.mkdirSync(imagesOut, { recursive: true })
+
+    for (const item of this.items) {
+      if (item.kind !== 'image' || !item.image) continue
+      for (const name of [item.image.file, item.image.thumbFile]) {
+        if (!name) continue
+        const from = path.join(this.imagesDir, name)
+        const to = path.join(imagesOut, name)
+        if (fs.existsSync(from) && !fs.existsSync(to)) {
+          try {
+            fs.copyFileSync(from, to)
+          } catch (err) {
+            console.error('[export] 图片复制失败', err)
+          }
+        }
+      }
+    }
+
+    fs.writeFileSync(
+      path.join(dir, 'clips.json'),
+      JSON.stringify({ version: 1, exportedAt: Date.now(), items: this.items }, null, 2),
+      'utf8',
+    )
+    return { count: this.items.length }
+  }
+
+  importFrom(dir) {
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, 'clips.json'), 'utf8'))
+    const incoming = Array.isArray(raw) ? raw : Array.isArray(raw.items) ? raw.items : []
+    const imagesIn = path.join(dir, 'images')
+    let added = 0
+    let skipped = 0
+
+    for (const entry of incoming) {
+      if (!entry || typeof entry.id !== 'string') {
+        skipped += 1
+        continue
+      }
+
+      if (entry.kind === 'image') {
+        if (!entry.image || !entry.hash || this.items.some((it) => it.kind === 'image' && it.hash === entry.hash)) {
+          skipped += 1
+          continue
+        }
+        const source = path.join(imagesIn, entry.image.file)
+        if (!fs.existsSync(source)) {
+          skipped += 1
+          continue
+        }
+        try {
+          fs.mkdirSync(this.imagesDir, { recursive: true })
+          fs.copyFileSync(source, path.join(this.imagesDir, entry.image.file))
+          const thumbSource = entry.image.thumbFile && path.join(imagesIn, entry.image.thumbFile)
+          if (thumbSource && fs.existsSync(thumbSource)) {
+            fs.copyFileSync(thumbSource, path.join(this.imagesDir, entry.image.thumbFile))
+          }
+        } catch (err) {
+          console.error('[import] 图片复制失败', err)
+          skipped += 1
+          continue
+        }
+        this.items.push({
+          id: randomUUID(),
+          text: typeof entry.text === 'string' ? entry.text : '',
+          kind: 'image',
+          image: entry.image,
+          hash: String(entry.hash),
+          pinned: Boolean(entry.pinned),
+          createdAt: Number(entry.createdAt) || Date.now(),
+          copiedCount: Number(entry.copiedCount) || 0,
+        })
+        added += 1
+        continue
+      }
+
+      const text = typeof entry.text === 'string' ? entry.text.trim() : ''
+      if (!text || this.items.some((it) => it.kind !== 'image' && it.text === text)) {
+        skipped += 1
+        continue
+      }
+      this.items.push({
+        id: randomUUID(),
+        text,
+        kind: entry.kind || detectKind(text),
+        pinned: Boolean(entry.pinned),
+        createdAt: Number(entry.createdAt) || Date.now(),
+        copiedCount: Number(entry.copiedCount) || 0,
+      })
+      added += 1
+    }
+
+    this.sort()
+    if (this.items.length > MAX_ITEMS) this.items.length = MAX_ITEMS
+    this.enforceImageLimit()
+    this.persist()
+    return { added, skipped }
+  }
+
   addImage(png, hash, width, height, thumbnailPng) {
     const existing = this.items.find((it) => it.kind === 'image' && it.hash === hash)
     if (existing) {

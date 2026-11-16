@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('clipbook', {
   resize: (width, height) => ipcRenderer.send('window:resize', { width, height }),
   control: (action) => ipcRenderer.send('window:control', action),
   info: () => ipcRenderer.invoke('app:info'),
+  exportData: () => ipcRenderer.invoke('data:export'),
+  importData: () => ipcRenderer.invoke('data:import'),
   onUpdate: (callback) => {
     const handler = (_event, items) => callback(items)
     ipcRenderer.on('clips:updated', handler)

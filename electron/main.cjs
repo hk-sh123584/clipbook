@@ -7,6 +7,7 @@ const {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   globalShortcut,
   ipcMain,
   Menu,
@@ -27,6 +28,7 @@ let tray = null
 let store = null
 let lastText = ''
 let lastImageKey = ''
+let lastFilesKey = ''
 let pollTimer = null
 let hiddenWindowTimer = null
 let savedWindowBounds = null
@@ -109,7 +111,33 @@ function registerImageProtocol() {
   })
 }
 
+function readClipboardFiles() {
+  try {
+    const buffer = clipboard.readBuffer('FileNameW')
+    if (!buffer || buffer.length < 2) return []
+    return buffer
+      .toString('utf16le')
+      .split('\u0000')
+      .map((name) => name.trim())
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 function pollClipboard() {
+  const files = readClipboardFiles()
+  if (files.length) {
+    const key = files.join('|')
+    if (key !== lastFilesKey) {
+      lastFilesKey = key
+      lastText = ''
+      lastImageKey = ''
+      if (store.addFiles(files)) broadcast()
+    }
+    return
+  }
+
   const text = clipboard.readText()
   if (text) {
     if (text !== lastText) {
@@ -255,19 +283,89 @@ function toggleWindow() {
   else showWindow()
 }
 
-function createTray() {
-  const icon = nativeImage.createFromPath(assetPath('tray.png'))
-  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }))
-  tray.setToolTip('剪贴簿 · Ctrl+Shift+V')
+function loginItemPath() {
+  // 便携版实际运行在临时目录，自启必须指向用户双击的那个 exe。
+  return process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
+}
+
+function isAutoStartEnabled() {
+  try {
+    return app.getLoginItemSettings({ path: loginItemPath() }).openAtLogin
+  } catch {
+    return false
+  }
+}
+
+function setAutoStart(enabled) {
+  try {
+    app.setLoginItemSettings({ openAtLogin: enabled, path: loginItemPath() })
+  } catch (err) {
+    console.error('[autostart] 设置失败', err)
+  }
+  refreshTrayMenu()
+}
+
+async function chooseFolder(title) {
+  const options = { title, properties: ['openDirectory', 'createDirectory'] }
+  const result = win && !win.isDestroyed()
+    ? await dialog.showOpenDialog(win, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled || !result.filePaths[0]) return null
+  return result.filePaths[0]
+}
+
+async function exportRecords() {
+  const dir = await chooseFolder('选择导出文件夹')
+  if (!dir) return { ok: false, canceled: true }
+  try {
+    const { count } = store.exportTo(dir)
+    return { ok: true, count }
+  } catch (err) {
+    console.error('[export] 导出失败', err)
+    return { ok: false, error: String(err.message || err) }
+  }
+}
+
+async function importRecords() {
+  const dir = await chooseFolder('选择导入文件夹（含 clips.json）')
+  if (!dir) return { ok: false, canceled: true }
+  try {
+    const { added, skipped } = store.importFrom(dir)
+    broadcast()
+    return { ok: true, added, skipped }
+  } catch (err) {
+    console.error('[import] 导入失败', err)
+    return { ok: false, error: String(err.message || err) }
+  }
+}
+
+function refreshTrayMenu() {
+  if (!tray) return
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '显示剪贴簿', click: () => showWindow() },
+      { type: 'separator' },
+      {
+        label: '开机自启',
+        type: 'checkbox',
+        checked: isAutoStartEnabled(),
+        click: (item) => setAutoStart(item.checked),
+      },
+      { label: '导出记录…', click: () => { exportRecords() } },
+      { label: '导入记录…', click: () => { importRecords() } },
       { type: 'separator' },
       { label: '清空历史', click: () => { store.clear(); broadcast() } },
       { type: 'separator' },
       { label: '退出', click: () => { app.isQuitting = true; app.quit() } },
     ]),
   )
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(assetPath('tray.png'))
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16, height: 16 }))
+  tray.setToolTip('剪贴簿 · Ctrl+Shift+V')
+  refreshTrayMenu()
   tray.on('click', () => toggleWindow())
 }
 
@@ -403,6 +501,9 @@ function registerIpc() {
     version: app.getVersion(),
     dataFile: store.file,
   }))
+
+  ipcMain.handle('data:export', () => exportRecords())
+  ipcMain.handle('data:import', () => importRecords())
 }
 
 app.whenReady().then(() => {

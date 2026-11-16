@@ -8,6 +8,27 @@ const KIND_LABEL: Record<ClipItem['kind'], string> = {
   link: '链接',
   code: '代码',
   image: '图片',
+  file: '文件',
+}
+
+type Filter = 'all' | 'link' | 'image' | 'pinned' | 'today'
+
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'link', label: '链接' },
+  { key: 'image', label: '图片' },
+  { key: 'pinned', label: '收藏' },
+  { key: 'today', label: '今天' },
+]
+
+function isToday(ts: number) {
+  const date = new Date(ts)
+  const now = new Date()
+  return (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  )
 }
 
 function pad(n: number) {
@@ -38,8 +59,10 @@ function formatTime(ts: number) {
 export default function App() {
   const [items, setItems] = useState<ClipItem[]>([])
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<Filter>('all')
   const [active, setActive] = useState(0)
   const [confirming, setConfirming] = useState(false)
+  const [notice, setNotice] = useState('')
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const copiedTimer = useRef<number | undefined>(undefined)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -48,9 +71,15 @@ export default function App() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return items
-    return items.filter((item) => item.text.toLowerCase().includes(q))
-  }, [items, query])
+    return items.filter((item) => {
+      if (filter === 'link' && item.kind !== 'link') return false
+      if (filter === 'image' && item.kind !== 'image') return false
+      if (filter === 'pinned' && !item.pinned) return false
+      if (filter === 'today' && !isToday(item.createdAt)) return false
+      if (!q) return true
+      return item.text.toLowerCase().includes(q)
+    })
+  }, [items, query, filter])
 
   useEffect(() => {
     const api = window.clipbook
@@ -73,7 +102,13 @@ export default function App() {
     setActive(0)
     setConfirming(false)
     listRef.current?.scrollTo(0)
-  }, [query])
+  }, [query, filter])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 2600)
+    return () => window.clearTimeout(timer)
+  }, [notice])
 
   useEffect(() => {
     listRef.current?.resetAfterIndex(0, false)
@@ -123,6 +158,26 @@ export default function App() {
     const next = await api.clear()
     setItems(next)
     setConfirming(false)
+  }
+
+  const exportData = async () => {
+    const api = window.clipbook
+    if (!api) return
+    const result = await api.exportData()
+    if (result.ok) setNotice(`已导出 ${result.count ?? 0} 条记录`)
+    else if (!result.canceled) setNotice('导出失败，请换个文件夹重试')
+  }
+
+  const importData = async () => {
+    const api = window.clipbook
+    if (!api) return
+    const result = await api.importData()
+    if (!result.ok) {
+      if (!result.canceled) setNotice('导入失败，请确认文件夹里有 clips.json')
+      return
+    }
+    setItems(await api.list())
+    setNotice(`导入 ${result.added ?? 0} 条，跳过 ${result.skipped ?? 0} 条`)
   }
 
   useEffect(() => {
@@ -203,6 +258,26 @@ export default function App() {
           title="清空全部历史"
         >
           {confirming ? '确认清空' : '清空'}
+        </button>
+      </div>
+
+      <div className="filters">
+        {FILTERS.map((entry) => (
+          <button
+            key={entry.key}
+            type="button"
+            className={`chip ${filter === entry.key ? 'on' : ''}`}
+            onClick={() => setFilter(entry.key)}
+          >
+            {entry.label}
+          </button>
+        ))}
+        <span className="filter-gap" />
+        <button type="button" className="chip action" title="导出到文件夹" onClick={exportData}>
+          导出
+        </button>
+        <button type="button" className="chip action" title="从文件夹导入" onClick={importData}>
+          导入
         </button>
       </div>
 
@@ -298,8 +373,8 @@ export default function App() {
       )}
 
       <footer className="foot">
-        <span>
-          共 {items.length} 条{pinnedCount > 0 ? ` · 收藏 ${pinnedCount}` : ''}
+        <span className={notice ? 'notice' : ''}>
+          {notice || `共 ${items.length} 条${pinnedCount > 0 ? ` · 收藏 ${pinnedCount}` : ''}`}
         </span>
         <span>↑↓ 选择 · Enter 复制 · Esc 收起</span>
       </footer>
